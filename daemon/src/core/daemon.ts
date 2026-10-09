@@ -1,10 +1,12 @@
 import type { Logger } from 'pino';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Lifecycle } from './lifecycle.js';
 import { loadConfig, defaultConfigPath } from './config.js';
-import type { OpenAIOAuthConfig } from './config.js';
+import type { ApiConfig } from './config.js';
 import { ensureDataDir } from './logger.js';
+import { SecretStore } from './secret-store.js';
 import { DatabaseManager } from '../db/database.js';
 import { ProjectManager } from '../db/projects.js';
 import { Scheduler } from '../scheduler/scheduler.js';
@@ -27,6 +29,11 @@ import { registerBuiltinTools } from '../tools/builtin/index.js';
 import { TaskLedger, BlockerMemory } from '../tasks/index.js';
 import { CommitmentStore } from '../commitment/store.js';
 import { CommitmentScheduler } from '../commitment/scheduler.js';
+import { AgentOSManager } from '../agent-os/manager.js';
+import { AgentOSApiServer } from '../api/server.js';
+import { AutoPublisher } from '../deploy/auto-publisher.js';
+import { generateNewsRoundup } from '../reporter/news-roundup.js';
+import { getRuntimeVersionInfo, formatVersionLabel } from './version.js';
 import type { DaemonModule, DaemonState } from './lifecycle.js';
 import type { DaemonConfig } from './config.js';
 
@@ -45,6 +52,7 @@ export class Daemon {
   private sessionId = randomUUID();
   private tasksCompleted = 0;
   private startTime = Date.now();
+  private releaseInstanceLock: (() => void) | null = null;
   config: DaemonConfig | null = null;
 
   constructor(
@@ -68,6 +76,7 @@ export class Daemon {
 
     // Ensure data directory exists
     const dataDir = ensureDataDir();
+    this.releaseInstanceLock = acquireInstanceLock(dataDir, this.logger);
 
     // Load config
     const cfgPath = this.configPath ?? defaultConfigPath();
@@ -129,6 +138,7 @@ export class Daemon {
 
     // Project manager — handles multiple projects
     const projectManager = new ProjectManager(db.connection, this.logger);
+    const secretStore = new SecretStore(db.connection, this.logger);
 
     // If config has a legacy workspace, auto-register it as a project
     if (this.config.workspace) {
@@ -158,6 +168,7 @@ export class Daemon {
     let reporter: TelegramReporter | null = null;
     if (this.config.telegram.botToken) {
       reporter = new TelegramReporter(this.config.telegram, this.logger);
+      reporter.setStartedAt(new Date(this.startTime).toISOString());
       this.register(reporter);
     }
 
@@ -210,11 +221,28 @@ export class Daemon {
       this.config, persona, conversationMemory, projectManager, this.logger,
       budgetTracker, this.sessionId,
     );
+    const autoPublisher = new AutoPublisher(this.logger);
+    conversationHandler.setAutoPublish((input) => autoPublisher.publishIfNeeded(input));
     reporter?.onConversation(conversationHandler);
+    reporter?.onSecrets(secretStore);
 
     // Tool registry — typed tool layer for function-calling
     const toolRegistry = new ToolRegistry(this.logger);
-    registerBuiltinTools(toolRegistry, this.logger);
+    registerBuiltinTools(toolRegistry, this.logger, {
+      resolveSecret: (key: string) => secretStore.resolveValue(key),
+      requestSecret: (key: string, context?: string) => {
+        secretStore.request(key, context);
+        reporter?.sendMessage(
+          `<b>Credential Required</b>\n` +
+          `Key: <code>${escapeHtml(key)}</code>\n` +
+          `${context ? `Context: ${escapeHtml(context)}\n` : ''}` +
+          `Set it: <code>/setsecret ${escapeHtml(key)} your-value</code>\n` +
+          `Check all pending: <code>/secret_requests</code>`,
+        ).catch((error) => {
+          this.logger.warn({ error, key }, 'Failed to send credential request prompt');
+        });
+      },
+    });
     conversationHandler.setToolRegistry(toolRegistry);
     reporter?.onTools(toolRegistry);
 
@@ -222,6 +250,25 @@ export class Daemon {
     const taskLedger = new TaskLedger(db.connection, this.logger);
     reporter?.onTaskLedger(taskLedger);
     conversationHandler.setTaskLedger(taskLedger);
+
+    // Agent OS manager — persistent agents/objectives on top of task ledger
+    const agentOS = new AgentOSManager(db.connection, this.logger, taskLedger);
+    agentOS.ensureBootstrapAgent();
+    reporter?.onAgentOS(agentOS);
+
+    // Agent OS API server (optional via config or env)
+    const apiConfig = resolveApiConfig(this.config);
+    if (apiConfig?.enabled) {
+      const apiServer = new AgentOSApiServer(apiConfig, this.logger, agentOS);
+      await apiServer.start();
+      this.register(apiServer);
+      await reporter?.sendMessage(
+        `🌐 <b>Agent OS API Online</b>\n` +
+        `Host: <code>${escapeHtml(apiConfig.host)}</code>\n` +
+        `Port: <code>${apiConfig.port}</code>\n` +
+        `Auth: ${apiConfig.bearerToken ? 'Bearer token required' : 'No bearer token configured'}`,
+      );
+    }
 
     // Blocker memory — self-learning from resolved blockers
     const blockerMemory = new BlockerMemory(db.connection, this.logger);
@@ -247,10 +294,72 @@ export class Daemon {
     await commitmentScheduler.start();
     this.register(commitmentScheduler);
 
-    // Commitment executor — reminders just pass through, complex tasks use LLM
+    // Commitment executor — run actionable commitments through the same pipeline
     commitmentScheduler.onExecute(async (commitment) => {
-      // Simple reminders don't need an LLM — the notification IS the fulfillment
-      return `⏰ Reminder: ${commitment.actionDescription}`;
+      const action = commitment.actionDescription.trim();
+      if (!action) {
+        return '⏰ Reminder: (empty action)';
+      }
+
+      // Deterministic path for news roundup asks: fetch headlines directly.
+      const isNewsAsk = /\b(news|headlines|round\s*up|roundup|update|updates|latest)\b/i.test(action);
+      if (isNewsAsk) {
+        try {
+          const roundup = await generateNewsRoundup(toolRegistry, action, 10);
+          if (roundup) return roundup;
+          return '📰 I checked, but couldn\'t extract fresh headlines from the feed right now.';
+        } catch (error) {
+          this.logger.warn({ error, action }, 'Deterministic news path failed; falling back to pipeline');
+        }
+      }
+
+      const actionLooksExecutable = /^(fetch|get|find|search|check|look up|compile|summari[sz]e|download|scrape|collect|gather|list|show me|tell me|give me|make me|pull|grab|run|execute|build|deploy|install|create|write|generate|update|monitor|scan|analy[sz]e|compare|calculate|count|test|verify|read)\b/i
+        .test(action);
+
+      if (!actionLooksExecutable) {
+        return `⏰ Reminder: ${action}`;
+      }
+
+      const task = taskLedger.create({
+        title: action,
+        type: 'commitment',
+        priority: 6,
+        deadline: commitment.executeAt ?? undefined,
+      });
+
+      const result = await conversationHandler.executeTask(task.id);
+      if (!result) {
+        throw new Error('Scheduled task pipeline failed to generate a plan');
+      }
+
+      const { verification, plan } = result;
+      if (!verification.verified) {
+        throw new Error(verification.failedCriteria ?? 'Scheduled task verification failed');
+      }
+
+      const doneSteps = plan.steps.filter(s => s.status === 'done').length;
+
+      // Try to extract human-friendly headlines from web_fetch RSS output.
+      const headlines = plan.steps
+        .flatMap((s) => {
+          const data = (s.output as { data?: { type?: string; items?: Array<{ title?: string; link?: string }> } } | undefined)?.data;
+          if (!data || data.type !== 'rss' || !Array.isArray(data.items)) return [];
+          return data.items
+            .slice(0, 5)
+            .map((item, idx) => {
+              const title = item.title?.trim();
+              const link = item.link?.trim();
+              if (!title) return null;
+              return `${idx + 1}. ${title}${link ? `\n${link}` : ''}`;
+            })
+            .filter((v): v is string => v !== null);
+        });
+
+      if (headlines.length > 0) {
+        return `📰 Latest news roundup\n\n${headlines.join('\n\n')}`;
+      }
+
+      return `✅ Scheduled task complete (${doneSteps}/${plan.steps.length} steps). ${verification.evidence}`;
     });
 
     // Commitment notifier — sends results via Telegram
@@ -292,9 +401,19 @@ export class Daemon {
 
     // Wire up the execution loop to the scheduler
     scheduler.onTask(async () => {
+      const objectiveExecuted = await this.executeNextObjectiveTask(
+        agentOS,
+        conversationHandler,
+        budgetTracker,
+        reporter,
+      );
+      if (objectiveExecuted) {
+        return;
+      }
+
       const activeProject = projectManager.getActiveProject();
       if (!activeProject) {
-        this.logger.info('No active project — skipping task');
+        this.logger.info('No active project and no queued objectives — skipping task');
         return;
       }
 
@@ -315,13 +434,137 @@ export class Daemon {
       }
     });
 
-    this.logger.info('Mother Brain Daemon started');
+    this.logger.info({ version: formatVersionLabel(new Date(this.startTime).toISOString()) }, 'Mother Brain Daemon started');
+
+    if (reporter) {
+      const info = getRuntimeVersionInfo(new Date(this.startTime).toISOString());
+      await reporter.sendMessage(
+        `🚀 <b>Mother Brain Daemon Online</b>
+Version: <code>${info.buildVersion}</code> (${info.commit})
+Env: <code>${info.environment}</code>
+PID: <code>${info.pid}</code>
+Use /version anytime to verify active runtime.`
+      ).catch((err) => {
+        this.logger.warn({ error: err }, 'Failed to send startup version banner');
+      });
+    }
   }
 
   async stop(): Promise<void> {
     this.logger.info('Mother Brain Daemon stopping...');
     await this.lifecycle.stopAll();
+    try {
+      this.releaseInstanceLock?.();
+      this.releaseInstanceLock = null;
+    } catch (error) {
+      this.logger.warn({ error }, 'Failed to release daemon instance lock');
+    }
     this.logger.info('Mother Brain Daemon stopped');
+  }
+
+  /**
+   * Core execution loop — called on each scheduler heartbeat.
+   */
+  private async executeNextObjectiveTask(
+    agentOS: AgentOSManager,
+    conversationHandler: ConversationHandler,
+    budgetTracker: BudgetTracker,
+    reporter: TelegramReporter | null,
+  ): Promise<boolean> {
+    if (this.paused) {
+      this.logger.debug('Daemon paused — skipping objective task');
+      return false;
+    }
+
+    if (!budgetTracker.canProceed(this.sessionId)) {
+      this.logger.info('Budget exceeded — objective execution paused');
+      await reporter?.notifyBudgetWarning(
+        budgetTracker.getStatus(this.sessionId).totalSpent.toFixed(2),
+        '0.00',
+        this.config!.budget.currency,
+      );
+      return false;
+    }
+
+    const picked = agentOS.pickNextRunnableTask();
+    if (!picked) return false;
+
+    const { objective, task, agent } = picked;
+    agentOS.setAgentStatus(agent.id, 'running');
+
+    const approval = agentOS.ensureTaskApproval(task, objective, agent);
+    if (approval.state === 'pending') {
+      agentOS.setAgentStatus(agent.id, 'idle');
+      if (approval.created && approval.approval) {
+        await reporter?.sendMessage(
+          `✋ <b>Approval Required</b>\n` +
+          `Objective: <code>${objective.id}</code>\n` +
+          `Task: <code>${task.id}</code>\n` +
+          `Type: ${approval.approval.approvalType}\n` +
+          `Reason: ${escapeHtml(approval.approval.reason)}\n\n` +
+          `Use /approve ${approval.approval.id} or /reject ${approval.approval.id} <reason>`,
+        );
+      }
+      return true;
+    }
+
+    await reporter?.sendMessage(
+      `🤖 <b>${agent.name}</b> started objective <code>${objective.id}</code>\n` +
+      `🎯 ${escapeHtml(objective.title)}\n` +
+      `📋 Task <code>${task.id}</code>: ${escapeHtml(task.title)}`,
+    );
+
+    let currentObjectiveStatus = objective.status;
+
+    try {
+      const result = await conversationHandler.executeTask(task.id);
+      if (!result) {
+        agentOS.recordExecutionFailure(task.id, 'Objective task pipeline failed to generate a plan');
+      } else if (result.task.status === 'done') {
+        this.tasksCompleted++;
+      }
+
+      const refreshed = agentOS.refreshObjectiveStatusFromTask(task.id);
+      currentObjectiveStatus = refreshed?.status ?? currentObjectiveStatus;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error({ objectiveId: objective.id, taskId: task.id, error: errorMsg }, 'Objective task execution failed');
+      agentOS.recordExecutionFailure(task.id, errorMsg);
+      const refreshed = agentOS.refreshObjectiveStatusFromTask(task.id);
+      currentObjectiveStatus = refreshed?.status ?? 'blocked';
+    } finally {
+      agentOS.setAgentStatus(agent.id, 'idle');
+    }
+
+    if (currentObjectiveStatus === 'completed') {
+      await reporter?.sendMessage(
+        `✅ Objective complete <code>${objective.id}</code>\n` +
+        `🎯 ${escapeHtml(objective.title)}\n` +
+        `Agent: <b>${agent.name}</b>`,
+      );
+    } else if (currentObjectiveStatus === 'blocked') {
+      const objectiveTasks = agentOS.getObjectiveTasks(objective.id);
+      const latestBlockedTask = objectiveTasks
+        .filter((item) => item.status === 'failed' || item.status === 'blocked')
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+      const blockerReason = latestBlockedTask?.lastError
+        ?? latestBlockedTask?.blockReason
+        ?? 'No blocker reason captured.';
+      const looksCredentialRelated = /credential|required|missing secret|missing credentials|setsecret|CREDENTIAL_REQUIRED/i
+        .test(blockerReason);
+      const nextAction = looksCredentialRelated
+        ? 'Likely needs credentials. Use /secret_requests and /setsecret KEY value.'
+        : 'Use /objective_tasks <objective-id> to inspect failures and next runnable tasks.';
+
+      await reporter?.sendMessage(
+        `🚫 Objective blocked <code>${objective.id}</code>\n` +
+        `🎯 ${escapeHtml(objective.title)}\n` +
+        `Reason: ${escapeHtml(blockerReason.slice(0, 300))}\n` +
+        `${escapeHtml(nextAction)}`,
+      );
+    }
+
+    return true;
   }
 
   /**
@@ -451,4 +694,78 @@ function formatUptime(ms: number): string {
   const hours = Math.floor(ms / 3_600_000);
   const minutes = Math.floor((ms % 3_600_000) / 60_000);
   return `${hours}h ${minutes}m`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function resolveApiConfig(config: DaemonConfig): ApiConfig | null {
+  if (config.api) {
+    if (!config.api.enabled) return null;
+    return config.api;
+  }
+
+  const envPort = process.env['AGENT_OS_API_PORT'];
+  if (!envPort) return null;
+
+  const parsedPort = Number.parseInt(envPort, 10);
+  if (!Number.isFinite(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+    return null;
+  }
+
+  const envHost = process.env['AGENT_OS_API_HOST']?.trim();
+  const envToken = process.env['AGENT_OS_API_TOKEN']?.trim();
+
+  return {
+    enabled: true,
+    host: envHost && envHost.length > 0 ? envHost : '127.0.0.1',
+    port: parsedPort,
+    bearerToken: envToken && envToken.length > 0 ? envToken : undefined,
+  };
+}
+
+function acquireInstanceLock(dataDir: string, logger: Logger): () => void {
+  const lockPath = join(dataDir, 'daemon.lock');
+
+  if (existsSync(lockPath)) {
+    try {
+      const raw = readFileSync(lockPath, 'utf-8').trim();
+      const existingPid = Number.parseInt(raw, 10);
+      if (Number.isFinite(existingPid)) {
+        try {
+          process.kill(existingPid, 0);
+          throw new Error(`Another daemon instance is already running (pid=${existingPid})`);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== 'ESRCH') {
+            throw error;
+          }
+          // Stale lock: process no longer exists
+          unlinkSync(lockPath);
+        }
+      } else {
+        unlinkSync(lockPath);
+      }
+    } catch (error) {
+      if (existsSync(lockPath)) {
+        throw error;
+      }
+    }
+  }
+
+  writeFileSync(lockPath, String(process.pid), 'utf-8');
+  logger.info({ lockPath, pid: process.pid }, 'Acquired daemon instance lock');
+
+  return () => {
+    if (!existsSync(lockPath)) return;
+    const raw = readFileSync(lockPath, 'utf-8').trim();
+    if (raw === String(process.pid)) {
+      unlinkSync(lockPath);
+      logger.info({ lockPath, pid: process.pid }, 'Released daemon instance lock');
+    }
+  };
 }

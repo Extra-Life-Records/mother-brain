@@ -196,4 +196,120 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_blocker_type ON blocker_resolutions(blocker_type);
     `,
   },
+  {
+    name: '005_agent_os_core',
+    sql: `
+      CREATE TABLE agents (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        role_prompt TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('provisioning', 'idle', 'running', 'paused', 'offline', 'error')),
+        autonomy_mode TEXT NOT NULL CHECK(autonomy_mode IN ('manual', 'supervised', 'autonomous')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE objectives (
+        id TEXT PRIMARY KEY,
+        project_id TEXT REFERENCES projects(id),
+        owner_agent_id TEXT REFERENCES agents(id),
+        requested_by TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        definition_of_done TEXT NOT NULL DEFAULT '{}',
+        priority INTEGER NOT NULL DEFAULT 5,
+        status TEXT NOT NULL CHECK(status IN ('draft', 'queued', 'planning', 'running', 'waiting_approval', 'blocked', 'completed', 'failed', 'canceled')),
+        started_at TEXT,
+        completed_at TEXT,
+        result_summary TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE delegations (
+        id TEXT PRIMARY KEY,
+        objective_id TEXT NOT NULL REFERENCES objectives(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        from_agent_id TEXT NOT NULL REFERENCES agents(id),
+        to_agent_id TEXT NOT NULL REFERENCES agents(id),
+        status TEXT NOT NULL CHECK(status IN ('requested', 'accepted', 'running', 'answered', 'rejected', 'expired')),
+        question TEXT NOT NULL,
+        context_json TEXT NOT NULL DEFAULT '{}',
+        response_json TEXT NOT NULL DEFAULT '{}',
+        deadline TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE objective_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        objective_id TEXT NOT NULL REFERENCES objectives(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      ALTER TABLE tasks ADD COLUMN objective_id TEXT REFERENCES objectives(id);
+      ALTER TABLE tasks ADD COLUMN assigned_agent_id TEXT REFERENCES agents(id);
+
+      CREATE INDEX idx_agents_status ON agents(status);
+      CREATE INDEX idx_objectives_status ON objectives(status);
+      CREATE INDEX idx_objectives_owner ON objectives(owner_agent_id);
+      CREATE INDEX idx_tasks_objective_id ON tasks(objective_id);
+      CREATE INDEX idx_tasks_assigned_agent_id ON tasks(assigned_agent_id);
+      CREATE INDEX idx_delegations_status ON delegations(status);
+      CREATE INDEX idx_delegations_to_agent ON delegations(to_agent_id);
+      CREATE INDEX idx_objective_events_objective ON objective_events(objective_id, created_at);
+    `,
+  },
+  {
+    name: '006_agent_os_approvals_and_delegation_link',
+    sql: `
+      ALTER TABLE delegations ADD COLUMN delegated_task_id TEXT REFERENCES tasks(id);
+
+      CREATE TABLE approvals (
+        id TEXT PRIMARY KEY,
+        objective_id TEXT NOT NULL REFERENCES objectives(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        requested_by_agent_id TEXT NOT NULL REFERENCES agents(id),
+        requested_from TEXT NOT NULL,
+        approval_type TEXT NOT NULL CHECK(approval_type IN ('publish', 'spend', 'external_action', 'destructive_action', 'policy_override')),
+        reason TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'expired')),
+        decision_note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        decided_at TEXT
+      );
+
+      CREATE INDEX idx_approvals_status ON approvals(status);
+      CREATE INDEX idx_approvals_objective ON approvals(objective_id);
+      CREATE INDEX idx_approvals_task ON approvals(task_id);
+      CREATE INDEX idx_delegations_delegated_task ON delegations(delegated_task_id);
+    `,
+  },
+  {
+    name: '007_secret_store',
+    sql: `
+      CREATE TABLE secrets (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE secret_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        secret_key TEXT NOT NULL,
+        context TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'resolved', 'dismissed')) DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+      );
+
+      CREATE INDEX idx_secret_requests_status ON secret_requests(status);
+      CREATE INDEX idx_secret_requests_key ON secret_requests(secret_key);
+    `,
+  },
 ];

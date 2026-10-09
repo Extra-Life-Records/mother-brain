@@ -10,7 +10,7 @@ import type { DetectedCommitment, CommitmentLLMClient } from '../commitment/dete
 import type { ToolRegistry } from '../tools/index.js';
 import type { TaskLedger } from '../tasks/index.js';
 import { runPipeline } from '../tasks/index.js';
-import type { PipelineResult, HeartbeatCallback } from '../tasks/index.js';
+import type { PipelineResult, HeartbeatCallback, AutoPublishCallback } from '../tasks/index.js';
 import type { BlockerMemory } from '../tasks/index.js';
 import { ChatGPTCodexClient } from '../llm/chatgpt-codex.js';
 import type { ResponsesInput, ResponsesTool } from '../llm/chatgpt-codex.js';
@@ -66,6 +66,35 @@ function truncateToolOutput(output: string): string {
   return output.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n\n[... truncated, ${output.length} total chars]`;
 }
 
+function normalizeModelErrorText(error: unknown): string {
+  const err = error as {
+    message?: string;
+    code?: string;
+    status?: number;
+    error?: { message?: string };
+  };
+  const parts = [
+    typeof err.status === 'number' ? `status ${err.status}` : '',
+    typeof err.code === 'string' ? err.code : '',
+    typeof err.message === 'string' ? err.message : '',
+    typeof err.error?.message === 'string' ? err.error.message : '',
+    error instanceof Error ? error.message : '',
+  ];
+  return parts.join(' ').toLowerCase();
+}
+
+function isFallbackWorthyModelError(error: unknown): boolean {
+  const text = normalizeModelErrorText(error);
+  return (
+    text.includes('429') ||
+    text.includes('too many requests') ||
+    text.includes('rate limit') ||
+    text.includes('unknown model') ||
+    text.includes('model_not_found') ||
+    text.includes('404')
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Conversation Handler — routes through Brain Runtime
 // ---------------------------------------------------------------------------
@@ -89,8 +118,10 @@ export class ConversationHandler {
   private toolRegistry: ToolRegistry | null = null;
   private taskLedger: TaskLedger | null = null;
   private blockerMemory: BlockerMemory | null = null;
+  private autoPublish: AutoPublishCallback | null = null;
   private plannerModel: string | undefined;
   private verifierModel: string | undefined;
+  private chatFallbackModels: string[] = [];
   private plannerClient: OpenAI | undefined;
   private verifierClient: OpenAI | undefined;
   private codexClient: ChatGPTCodexClient | null = null;
@@ -155,8 +186,21 @@ export class ConversationHandler {
       });
     }
 
+    const chatFallbackCandidates = [
+      chatTier?.fallback?.model,
+      'openai/gpt-4.1',
+      'openai/gpt-4.1-mini',
+    ];
+    this.chatFallbackModels = Array.from(new Set(
+      chatFallbackCandidates
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .map((value) => value.trim())
+        .filter((value) => value !== this.model),
+    ));
+
     this.logger.info({
       chatModel: this.model,
+      chatFallbackModels: this.chatFallbackModels,
       chatProvider: this.codexClient ? 'chatgpt-codex' : 'openai-sdk',
       plannerModel: this.plannerModel ?? '(same as chat)',
       verifierModel: this.verifierModel ?? '(same as chat)',
@@ -246,12 +290,11 @@ export class ConversationHandler {
 
       // Multi-turn tool-use loop: LLM can call tools multiple times
       while (toolRound <= MAX_TOOL_ROUNDS) {
-        const response = await this.client.chat.completions.create({
-          model: this.model,
-          max_completion_tokens: openAITools ? 1024 : 512,
-          messages: currentMessages,
-          ...(openAITools ? { tools: openAITools } : {}),
-        });
+        const response = await this.createChatCompletionWithFallback(
+          currentMessages,
+          openAITools,
+          openAITools ? 1024 : 512,
+        );
 
         inputTokens += response.usage?.prompt_tokens ?? 0;
         outputTokens += response.usage?.completion_tokens ?? 0;
@@ -309,11 +352,7 @@ export class ConversationHandler {
             return m;
           }) as OpenAI.ChatCompletionMessageParam[];
 
-          const retryResponse = await this.client.chat.completions.create({
-            model: this.model,
-            max_completion_tokens: 512,
-            messages: reducedMessages,
-          });
+          const retryResponse = await this.createChatCompletionWithFallback(reducedMessages, undefined, 512);
           reply = retryResponse.choices[0]?.message?.content ?? "I fetched data but it was too large. Try a more specific request.";
           inputTokens += retryResponse.usage?.prompt_tokens ?? 0;
           outputTokens += retryResponse.usage?.completion_tokens ?? 0;
@@ -394,6 +433,11 @@ export class ConversationHandler {
     this.blockerMemory = memory;
   }
 
+  /** Attach an auto-publisher to publish deployable outputs after verified tasks. */
+  setAutoPublish(callback: AutoPublishCallback): void {
+    this.autoPublish = callback;
+  }
+
   /** Run a task through the full planner/executor/verifier pipeline. */
   async executeTask(taskId: string, onHeartbeat?: HeartbeatCallback): Promise<PipelineResult | null> {
     if (!this.toolRegistry || !this.taskLedger) {
@@ -412,6 +456,7 @@ export class ConversationHandler {
       logger: this.logger,
       blockerMemory: this.blockerMemory ?? undefined,
       onHeartbeat,
+      autoPublish: this.autoPublish ?? undefined,
     });
   }
 
@@ -494,6 +539,44 @@ export class ConversationHandler {
     }
 
     return { reply, inputTokens, outputTokens };
+  }
+
+  private async createChatCompletionWithFallback(
+    messages: OpenAI.ChatCompletionMessageParam[],
+    tools: OpenAI.ChatCompletionTool[] | undefined,
+    maxCompletionTokens: number,
+  ) {
+    const models = [this.model, ...this.chatFallbackModels];
+    let lastError: unknown = null;
+
+    for (let i = 0; i < models.length; i++) {
+      const model = models[i]!;
+      try {
+        return await this.client.chat.completions.create({
+          model,
+          max_completion_tokens: maxCompletionTokens,
+          messages,
+          ...(tools ? { tools } : {}),
+        });
+      } catch (error) {
+        lastError = error;
+        const nextModel = models[i + 1];
+        if (!nextModel || !isFallbackWorthyModelError(error)) {
+          throw error;
+        }
+
+        this.logger.warn(
+          {
+            fromModel: model,
+            toModel: nextModel,
+            error: normalizeModelErrorText(error),
+          },
+          'Chat completion failed; retrying with fallback model',
+        );
+      }
+    }
+
+    throw (lastError instanceof Error ? lastError : new Error('Chat completion failed'));
   }
 
   /** Build phase-aware system prompt with project context. */

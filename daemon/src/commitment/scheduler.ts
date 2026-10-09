@@ -62,7 +62,11 @@ export class CommitmentScheduler implements DaemonModule {
 
     // Poll for due one-time commitments every minute
     this.pollJob = new Cron('* * * * *', { timezone: this.timezone }, async () => {
-      await this.pollDueCommitments();
+      try {
+        await this.pollDueCommitments();
+      } catch (error) {
+        this.logger.error({ error: String(error) }, 'Error polling due commitments');
+      }
     });
 
     this.logger.info(
@@ -135,7 +139,7 @@ export class CommitmentScheduler implements DaemonModule {
   }
 
   private async pollDueCommitments(): Promise<void> {
-    const due = this.store.getDueCommitments();
+    const due = this.store.claimDueOneTimeCommitments();
     for (const commitment of due) {
       // Skip recurring — they have their own cron jobs
       if (commitment.type === 'recurring') continue;

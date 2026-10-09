@@ -93,6 +93,13 @@ export interface WorkspaceConfig {
   branch: string;       // Branch to commit verified work to
 }
 
+export interface ApiConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  bearerToken?: string;
+}
+
 export interface DaemonConfig {
   activeHours: ActiveHoursConfig;
   timezone: string;
@@ -101,6 +108,7 @@ export interface DaemonConfig {
   llm: LLMConfig;
   workspace?: WorkspaceConfig;    // Optional — projects managed via Telegram/DB
   heartbeatMinutes?: number;      // Default: 15
+  api?: ApiConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +121,15 @@ class ConfigError extends Error {
     super(message);
     this.name = 'ConfigError';
   }
+}
+
+function normalizeModelId(model: string): string {
+  const trimmed = model.trim();
+  const aliases: Record<string, string> = {
+    'openai/gpt-5.3-codex': 'openai/gpt-5',
+    'gpt-5.3-codex': 'gpt-5',
+  };
+  return aliases[trimmed] ?? trimmed;
 }
 
 function assertString(obj: Record<string, unknown>, path: string): string {
@@ -178,7 +195,7 @@ function validateCopilotLLM(raw: unknown): CopilotLLMConfig | undefined {
   if (!obj['githubToken'] || !obj['model']) return undefined;
   return {
     githubToken: assertString(obj, 'githubToken'),
-    model: assertString(obj, 'model'),
+    model: normalizeModelId(assertString(obj, 'model')),
   };
 }
 
@@ -253,12 +270,12 @@ function validateTierConfig(raw: unknown, tierName: string): LLMTierConfig {
     if (!['local', 'copilot', 'cloud', 'openai'].includes(fbProvider)) {
       throw new ConfigError(`llm.tiers.${tierName}.fallback.provider must be local, copilot, cloud, or openai`);
     }
-    fallback = { provider: fbProvider, model: assertString(fb, 'model') };
+    fallback = { provider: fbProvider, model: normalizeModelId(assertString(fb, 'model')) };
   }
 
   return {
     provider,
-    model: assertString(obj, 'model'),
+    model: normalizeModelId(assertString(obj, 'model')),
     fallback,
   };
 }
@@ -293,6 +310,25 @@ function validateWorkspace(raw: unknown): WorkspaceConfig {
   };
 }
 
+function validateApi(raw: unknown): ApiConfig {
+  if (!raw || typeof raw !== 'object') {
+    throw new ConfigError('api must be an object when provided');
+  }
+  const obj = raw as Record<string, unknown>;
+  const enabled = typeof obj['enabled'] === 'boolean' ? obj['enabled'] : true;
+  const host = typeof obj['host'] === 'string' && obj['host'].trim().length > 0
+    ? obj['host']
+    : '127.0.0.1';
+  const port = typeof obj['port'] === 'number' ? obj['port'] : 8787;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new ConfigError('api.port must be an integer between 1 and 65535');
+  }
+  const bearerToken = typeof obj['bearerToken'] === 'string' && obj['bearerToken'].trim().length > 0
+    ? obj['bearerToken']
+    : undefined;
+  return { enabled, host, port, bearerToken };
+}
+
 // ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
@@ -316,7 +352,8 @@ export function loadConfig(configPath: string, logger: Logger): DaemonConfig {
 
   let raw: unknown;
   try {
-    const text = readFileSync(configPath, 'utf-8');
+    // Tolerate UTF-8 BOM to avoid config parse failures from some editors/tools.
+    const text = readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
     raw = JSON.parse(text);
   } catch (error) {
     throw new ConfigError(`Failed to parse config file: ${configPath} — ${error}`);
@@ -336,6 +373,7 @@ export function loadConfig(configPath: string, logger: Logger): DaemonConfig {
     llm: validateLLM(obj['llm']),
     workspace: obj['workspace'] ? validateWorkspace(obj['workspace']) : undefined,
     heartbeatMinutes: typeof obj['heartbeatMinutes'] === 'number' ? obj['heartbeatMinutes'] : 15,
+    api: obj['api'] ? validateApi(obj['api']) : undefined,
   };
 
   logger.info({ configPath }, 'Configuration loaded and validated');

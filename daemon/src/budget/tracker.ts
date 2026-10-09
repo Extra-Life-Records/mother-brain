@@ -23,6 +23,9 @@ const PRICING: Record<string, ModelPricing> = {
   'gpt-4.1-mini': { inputPerMillion: 0.40, outputPerMillion: 1.60 },
   'gpt-4o': { inputPerMillion: 2.50, outputPerMillion: 10.00 },
   'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.60 },
+  'gpt-5': { inputPerMillion: 2.00, outputPerMillion: 8.00 },
+  'gpt-5-mini': { inputPerMillion: 0.40, outputPerMillion: 1.60 },
+  'gpt-5-nano': { inputPerMillion: 0.15, outputPerMillion: 0.60 },
   'gpt-5.3-codex': { inputPerMillion: 2.00, outputPerMillion: 8.00 },
   // Local models
   'local': { inputPerMillion: 0, outputPerMillion: 0 },

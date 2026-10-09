@@ -17,6 +17,11 @@ export function isWithinActiveHours(config: ActiveHoursConfig, timezone: string)
   });
   const currentHour = parseInt(formatter.format(now), 10);
 
+  // start == end means "always on" (24/7).
+  if (config.start === config.end) {
+    return true;
+  }
+
   // Handle overnight windows (e.g., 23:00 - 07:00)
   if (config.start > config.end) {
     return currentHour >= config.start || currentHour < config.end;
@@ -58,6 +63,8 @@ export class Scheduler implements DaemonModule {
   /** Set the callback that runs on each heartbeat during active hours. */
   onTask(callback: TaskCallback): void {
     this.taskCallback = callback;
+    // Kick off one immediate heartbeat when the callback is attached.
+    void this.heartbeat();
   }
 
   async start(): Promise<void> {

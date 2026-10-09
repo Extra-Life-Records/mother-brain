@@ -9,6 +9,9 @@
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
+    "deploy:smoke": "bash scripts/deploy-restart-smoke.sh",
+    "confidence:check": "node scripts/confidence-check.mjs",
+    "test": "node --import tsx --test test/reporter/timed-intent.test.ts test/commitment/detector.test.ts test/agent-os/manager.test.ts test/deploy/auto-publisher.test.ts test/tasks/ledger-memory.test.ts test/tasks/pipeline-credentials.test.ts test/tasks/pipeline-reliability.test.ts test/tools/inbox-otp.test.ts test/core/secret-store.test.ts",
     "dev": "tsup src/index.ts --format esm --watch",
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build"
@@ -47,6 +50,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
+    "tsx": "^4.20.5",
     "tsup": "^8.0.0",
     "typescript": "^5.7.0"
   }

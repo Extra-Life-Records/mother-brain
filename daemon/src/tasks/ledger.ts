@@ -14,6 +14,8 @@ export interface Task {
   title: string;
   type: TaskType;
   status: TaskStatus;
+  objectiveId: string | null;
+  assignedAgentId: string | null;
   priority: number;
   parentTaskId: string | null;
   deadline: string | null;
@@ -40,6 +42,8 @@ export interface CreateTaskInput {
   priority?: number;
   parentTaskId?: string;
   deadline?: string;
+  objectiveId?: string;
+  assignedAgentId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,9 +62,22 @@ export class TaskLedger {
     const now = new Date().toISOString();
 
     this.db.prepare(`
-      INSERT INTO tasks (id, title, type, priority, parent_task_id, deadline, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, input.title, input.type, input.priority ?? 0, input.parentTaskId ?? null, input.deadline ?? null, now, now);
+      INSERT INTO tasks (
+        id, title, type, priority, parent_task_id, deadline, objective_id, assigned_agent_id, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.title,
+      input.type,
+      input.priority ?? 0,
+      input.parentTaskId ?? null,
+      input.deadline ?? null,
+      input.objectiveId ?? null,
+      input.assignedAgentId ?? null,
+      now,
+      now,
+    );
 
     this.logger.info({ taskId: id, type: input.type, title: input.title }, 'Task created');
     return this.getById(id)!;
@@ -188,6 +205,56 @@ export class TaskLedger {
     return this.listByStatus('queued', 'running', 'blocked');
   }
 
+  /**
+   * Find completed tasks most relevant to a new query.
+   * Used as lightweight long-term memory for planning.
+   */
+  findRelevantCompleted(query: string, limit = 3): Task[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE status = 'done'
+      ORDER BY completed_at DESC
+      LIMIT 100
+    `).all() as TaskRow[];
+
+    const doneTasks = rows.map(rowToTask);
+    if (doneTasks.length === 0) return [];
+
+    const queryTokens = tokenize(query);
+    if (queryTokens.size === 0) {
+      return doneTasks.slice(0, Math.max(1, limit));
+    }
+
+    const scored = doneTasks
+      .map((task) => {
+        const taskText = [
+          task.title,
+          ...task.artifacts.map((artifact) => `${artifact.label} ${artifact.value}`),
+        ].join(' ');
+        const taskTokens = tokenize(taskText);
+        if (taskTokens.size === 0) return { task, score: 0 };
+
+        let overlap = 0;
+        for (const token of queryTokens) {
+          if (taskTokens.has(token)) overlap++;
+        }
+
+        const score = overlap / queryTokens.size;
+        return { task, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return b.task.updatedAt.localeCompare(a.task.updatedAt);
+      });
+
+    if (scored.length === 0) {
+      return doneTasks.slice(0, Math.max(1, limit));
+    }
+
+    return scored.slice(0, Math.max(1, limit)).map((entry) => entry.task);
+  }
+
   /** List subtasks of a parent. */
   listSubtasks(parentId: string): Task[] {
     const rows = this.db.prepare(
@@ -222,6 +289,8 @@ interface TaskRow {
   title: string;
   type: string;
   status: string;
+  objective_id: string | null;
+  assigned_agent_id: string | null;
   priority: number;
   parent_task_id: string | null;
   deadline: string | null;
@@ -242,6 +311,8 @@ function rowToTask(row: TaskRow): Task {
     title: row.title,
     type: row.type as TaskType,
     status: row.status as TaskStatus,
+    objectiveId: row.objective_id,
+    assignedAgentId: row.assigned_agent_id,
     priority: row.priority,
     parentTaskId: row.parent_task_id,
     deadline: row.deadline,
@@ -260,3 +331,17 @@ function rowToTask(row: TaskRow): Task {
 function safeParse<T>(json: string, fallback: T): T {
   try { return JSON.parse(json); } catch { return fallback; }
 }
+
+function tokenize(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length >= 4 && !TASK_TOKEN_STOP_WORDS.has(token)),
+  );
+}
+
+const TASK_TOKEN_STOP_WORDS = new Set([
+  'that', 'this', 'with', 'from', 'have', 'will', 'your', 'into', 'task',
+  'make', 'build', 'create', 'write', 'done', 'step', 'steps',
+]);

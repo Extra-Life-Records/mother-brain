@@ -120,7 +120,7 @@ export class CommitmentStore {
         UPDATE commitments
         SET status = 'active', last_executed_at = datetime('now'),
             execution_count = execution_count + 1, next_run_at = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'executing'
       `).run(nextRun, id);
     } else {
       // One-time: mark fully completed
@@ -128,7 +128,7 @@ export class CommitmentStore {
         UPDATE commitments
         SET status = 'completed', last_executed_at = datetime('now'),
             execution_count = execution_count + 1
-        WHERE id = ?
+        WHERE id = ? AND status = 'executing'
       `).run(id);
     }
   }
@@ -138,7 +138,7 @@ export class CommitmentStore {
     this.db.prepare(`
       UPDATE commitments
       SET status = 'failed', failure_reason = ?, last_executed_at = datetime('now')
-      WHERE id = ?
+      WHERE id = ? AND status = 'executing'
     `).run(reason, id);
   }
 
@@ -169,6 +169,22 @@ export class CommitmentStore {
     return null;
   }
 
+  /** Reschedule an existing one-time commitment to a new execution timestamp. */
+  rescheduleOneTime(id: string, executeAt: string): Commitment | null {
+    const result = this.db.prepare(`
+      UPDATE commitments
+      SET execute_at = ?, next_run_at = ?, status = 'active', failure_reason = NULL
+      WHERE id = ?
+        AND type = 'one_time'
+        AND status IN ('active', 'failed')
+    `).run(executeAt, executeAt, id);
+
+    if (result.changes === 0) return null;
+
+    this.logger.info({ id, executeAt }, 'One-time commitment rescheduled');
+    return this.getById(id);
+  }
+
   /** Get commitments that are due for execution. */
   getDueCommitments(): Commitment[] {
     const now = new Date().toISOString();
@@ -182,6 +198,52 @@ export class CommitmentStore {
       ORDER BY COALESCE(execute_at, next_run_at) ASC
     `).all(now, now) as CommitmentRow[];
     return rows.map(r => this.toCommitment(r));
+  }
+
+  /**
+   * Atomically claim due one-time commitments for execution.
+   * This prevents duplicate runs if multiple daemon processes are polling.
+   */
+  claimDueOneTimeCommitments(limit: number = 20): Commitment[] {
+    const now = new Date().toISOString();
+    const selectStmt = this.db.prepare(`
+      SELECT * FROM commitments
+      WHERE status = 'active'
+        AND type = 'one_time'
+        AND execute_at <= ?
+      ORDER BY execute_at ASC
+      LIMIT ?
+    `);
+    const claimStmt = this.db.prepare(`
+      UPDATE commitments
+      SET status = 'executing'
+      WHERE id = ? AND status = 'active'
+    `);
+
+    const tx = this.db.transaction((ts: string, lim: number) => {
+      const candidates = selectStmt.all(ts, lim) as CommitmentRow[];
+      const claimed: Commitment[] = [];
+
+      for (const row of candidates) {
+        const result = claimStmt.run(row.id);
+        if (result.changes > 0) {
+          claimed.push(this.toCommitment({ ...row, status: 'executing' }));
+        }
+      }
+
+      return claimed;
+    });
+
+    try {
+      return tx(now, limit);
+    } catch (error) {
+      const code = (error as { code?: string })?.code;
+      if (code === 'SQLITE_BUSY') {
+        this.logger.warn('SQLite busy while claiming due commitments — will retry next poll cycle');
+        return [];
+      }
+      throw error;
+    }
   }
 
   /** Compute the next run time from a cron schedule (approximation). */

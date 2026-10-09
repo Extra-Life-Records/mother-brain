@@ -107,7 +107,7 @@ export async function runInitWizard(): Promise<void> {
   // Chat tier
   console.log();
   header('  💬 Chat Tier (understanding, conversing, organising)');
-  console.log('  1. openai/gpt-5.3-codex (recommended)');
+  console.log('  1. openai/gpt-5 (recommended)');
   console.log('  2. openai/gpt-4.1');
   console.log('  3. Custom');
   console.log();
@@ -115,10 +115,10 @@ export async function runInitWizard(): Promise<void> {
 
   let chatModel: string;
   switch (chatChoice.trim()) {
-    case '1': chatModel = 'openai/gpt-5.3-codex'; break;
+    case '1': chatModel = 'openai/gpt-5'; break;
     case '2': chatModel = 'openai/gpt-4.1'; break;
     case '3': chatModel = await rl.question('  Enter model ID: '); break;
-    default: chatModel = 'openai/gpt-5.3-codex';
+    default: chatModel = 'openai/gpt-5';
   }
   success(`Chat: copilot/${chatModel}`);
 
@@ -126,7 +126,7 @@ export async function runInitWizard(): Promise<void> {
   console.log();
   header('  📋 Planning Tier (planning, breaking down approaches)');
   console.log('  1. claude-opus-4.6 (recommended — best reasoning)');
-  console.log('  2. openai/gpt-5.3-codex');
+  console.log('  2. openai/gpt-5');
   console.log('  3. Custom');
   console.log();
   const planChoice = await rl.question('  Select (1-3): ');
@@ -134,7 +134,7 @@ export async function runInitWizard(): Promise<void> {
   let planningModel: string;
   switch (planChoice.trim()) {
     case '1': planningModel = 'claude-opus-4.6'; break;
-    case '2': planningModel = 'openai/gpt-5.3-codex'; break;
+    case '2': planningModel = 'openai/gpt-5'; break;
     case '3': planningModel = await rl.question('  Enter model ID: '); break;
     default: planningModel = 'claude-opus-4.6';
   }
@@ -143,7 +143,7 @@ export async function runInitWizard(): Promise<void> {
   // Coding tier
   console.log();
   header('  🏗️  Coding Tier (implementation — premium)');
-  console.log('  1. openai/gpt-5.3-codex (recommended — best coder)');
+  console.log('  1. openai/gpt-5 (recommended — best coder)');
   console.log('  2. openai/gpt-4.1');
   console.log('  3. Custom');
   console.log();
@@ -151,17 +151,17 @@ export async function runInitWizard(): Promise<void> {
 
   let codingModel: string;
   switch (codeChoice.trim()) {
-    case '1': codingModel = 'openai/gpt-5.3-codex'; break;
+    case '1': codingModel = 'openai/gpt-5'; break;
     case '2': codingModel = 'openai/gpt-4.1'; break;
     case '3': codingModel = await rl.question('  Enter model ID: '); break;
-    default: codingModel = 'openai/gpt-5.3-codex';
+    default: codingModel = 'openai/gpt-5';
   }
   success(`Coding: copilot/${codingModel}`);
 
   // Review tier
   console.log();
   header('  🔍 Review Tier (code review)');
-  console.log('  1. openai/gpt-5.3-codex (recommended)');
+  console.log('  1. openai/gpt-5 (recommended)');
   console.log('  2. openai/gpt-4.1');
   console.log('  3. Custom');
   console.log();
@@ -169,10 +169,10 @@ export async function runInitWizard(): Promise<void> {
 
   let reviewModel: string;
   switch (revChoice.trim()) {
-    case '1': reviewModel = 'openai/gpt-5.3-codex'; break;
+    case '1': reviewModel = 'openai/gpt-5'; break;
     case '2': reviewModel = 'openai/gpt-4.1'; break;
     case '3': reviewModel = await rl.question('  Enter model ID: '); break;
-    default: reviewModel = 'openai/gpt-5.3-codex';
+    default: reviewModel = 'openai/gpt-5';
   }
   success(`Review: copilot/${reviewModel}`);
 

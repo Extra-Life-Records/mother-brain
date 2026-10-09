@@ -62,6 +62,9 @@ const RECURRING_PATTERNS: Array<{
   { regex: /(?:every\s+week|weekly)/i, extractSchedule: () => '0 9 * * 1' },
 ];
 
+const RECURRING_COMMITMENT_CUE = /\b(i(?:'ll| will| can| am going to|\'m going to)|we(?:'ll| will)|scheduled|set to run|will run|running)\b/i;
+const RECURRING_NON_COMMITMENT_CUE = /\?|(?:\bfor example\b|\be\.g\.\b|\bsuch as\b|\bhow often\b|\bfrequency\b|\bif you\b|\bwould you\b|\bcould you\b|\bshould i\b|\bor is it enough\b)/i;
+
 // ---------------------------------------------------------------------------
 // Time Patterns (for converting time expressions to timestamps)
 // ---------------------------------------------------------------------------
@@ -266,8 +269,17 @@ export async function detectCommitments(
   for (const pattern of RECURRING_PATTERNS) {
     const match = normalized.match(pattern.regex);
     if (match) {
+      const promiseContext = extractPromiseContext(normalized, match.index ?? 0) || match[0];
+      if (RECURRING_NON_COMMITMENT_CUE.test(promiseContext)) {
+        logger.debug({ match: match[0], promiseContext }, 'Ignoring recurring pattern in non-commitment context');
+        continue;
+      }
+      if (!RECURRING_COMMITMENT_CUE.test(promiseContext)) {
+        logger.debug({ match: match[0], promiseContext }, 'Ignoring recurring pattern without commitment cue');
+        continue;
+      }
+
       const schedule = pattern.extractSchedule(match);
-      const promiseContext = extractPromiseContext(normalized, match.index ?? 0);
       commitments.push({
         type: 'recurring',
         promiseText: match[0],

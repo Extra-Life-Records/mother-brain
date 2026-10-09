@@ -1,0 +1,701 @@
+openapi: 3.1.0
+info:
+  title: Mother Brain Agent OS API
+  version: 0.1.0
+  summary: Control plane API for always-on autonomous agents
+servers:
+  - url: https://agentos.local
+tags:
+  - name: agents
+  - name: objectives
+  - name: tasks
+  - name: mobile
+  - name: runs
+  - name: approvals
+  - name: delegations
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/agents:
+    get:
+      tags: [agents]
+      summary: List agents
+      parameters:
+        - in: query
+          name: status
+          schema:
+            $ref: '#/components/schemas/AgentStatus'
+      responses:
+        '200':
+          description: Agent list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Agent'
+    post:
+      tags: [agents]
+      summary: Create an agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentRequest'
+      responses:
+        '201':
+          description: Agent created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+
+  /v1/agents/{agentId}:
+    get:
+      tags: [agents]
+      summary: Get agent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      responses:
+        '200':
+          description: Agent details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+    patch:
+      tags: [agents]
+      summary: Update agent settings
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAgentRequest'
+      responses:
+        '200':
+          description: Agent updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+
+  /v1/agents/{agentId}/commands:
+    post:
+      tags: [agents]
+      summary: Control an agent runtime
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                command:
+                  type: string
+                  enum: [pause, resume, stop, restart]
+              required: [command]
+      responses:
+        '202':
+          description: Command accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+
+  /v1/objectives:
+    get:
+      tags: [objectives]
+      summary: List objectives
+      parameters:
+        - in: query
+          name: project_id
+          schema:
+            type: string
+        - in: query
+          name: status
+          schema:
+            $ref: '#/components/schemas/ObjectiveStatus'
+      responses:
+        '200':
+          description: Objective list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Objective'
+    post:
+      tags: [objectives]
+      summary: Create objective
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateObjectiveRequest'
+      responses:
+        '201':
+          description: Objective created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Objective'
+
+  /v1/objectives/{objectiveId}:
+    get:
+      tags: [objectives]
+      summary: Get objective
+      parameters:
+        - $ref: '#/components/parameters/ObjectiveId'
+      responses:
+        '200':
+          description: Objective details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Objective'
+    patch:
+      tags: [objectives]
+      summary: Update objective metadata
+      parameters:
+        - $ref: '#/components/parameters/ObjectiveId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateObjectiveRequest'
+      responses:
+        '200':
+          description: Objective updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Objective'
+
+  /v1/objectives/{objectiveId}/commands:
+    post:
+      tags: [objectives]
+      summary: Control objective execution
+      parameters:
+        - $ref: '#/components/parameters/ObjectiveId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                command:
+                  type: string
+                  enum: [start, pause, resume, cancel, retry]
+              required: [command]
+      responses:
+        '202':
+          description: Command accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+
+  /v1/objectives/{objectiveId}/events:
+    get:
+      tags: [objectives]
+      summary: Stream objective events (SSE)
+      parameters:
+        - $ref: '#/components/parameters/ObjectiveId'
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  event: objective.updated
+                  data: {"objective_id":"obj_123","status":"running"}
+
+  /v1/objectives/{objectiveId}/messages:
+    post:
+      tags: [mobile]
+      summary: Send message to objective owner agent
+      parameters:
+        - $ref: '#/components/parameters/ObjectiveId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '202':
+          description: Message queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+
+  /v1/tasks/{taskId}/delegate:
+    post:
+      tags: [delegations]
+      summary: Delegate a task to another agent
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDelegationRequest'
+      responses:
+        '201':
+          description: Delegation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Delegation'
+
+  /v1/delegations/{delegationId}/respond:
+    post:
+      tags: [delegations]
+      summary: Respond to a delegation
+      parameters:
+        - $ref: '#/components/parameters/DelegationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DelegationResponseRequest'
+      responses:
+        '200':
+          description: Delegation updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Delegation'
+
+  /v1/approvals:
+    get:
+      tags: [approvals]
+      summary: List pending approvals
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, approved, rejected, expired]
+      responses:
+        '200':
+          description: Approval list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Approval'
+
+  /v1/approvals/{approvalId}/decision:
+    post:
+      tags: [approvals]
+      summary: Approve or reject an action
+      parameters:
+        - $ref: '#/components/parameters/ApprovalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        '200':
+          description: Approval resolved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approval'
+
+  /v1/runs/{runId}:
+    get:
+      tags: [runs]
+      summary: Get run details with step timeline
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Run details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+
+  /v1/mobile/inbox:
+    get:
+      tags: [mobile]
+      summary: Get user inbox for mobile clients
+      responses:
+        '200':
+          description: Message list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    AgentId:
+      in: path
+      name: agentId
+      required: true
+      schema:
+        type: string
+    ObjectiveId:
+      in: path
+      name: objectiveId
+      required: true
+      schema:
+        type: string
+    TaskId:
+      in: path
+      name: taskId
+      required: true
+      schema:
+        type: string
+    RunId:
+      in: path
+      name: runId
+      required: true
+      schema:
+        type: string
+    ApprovalId:
+      in: path
+      name: approvalId
+      required: true
+      schema:
+        type: string
+    DelegationId:
+      in: path
+      name: delegationId
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    AgentStatus:
+      type: string
+      enum: [provisioning, idle, running, paused, offline, error]
+
+    ObjectiveStatus:
+      type: string
+      enum: [draft, queued, planning, running, waiting_approval, blocked, completed, failed, canceled]
+
+    Agent:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        status: { $ref: '#/components/schemas/AgentStatus' }
+        autonomy_mode:
+          type: string
+          enum: [manual, supervised, autonomous]
+        host_id: { type: string, nullable: true }
+        role_prompt: { type: string }
+        max_concurrency: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [id, name, status, autonomy_mode, role_prompt, max_concurrency, created_at, updated_at]
+
+    CreateAgentRequest:
+      type: object
+      properties:
+        name: { type: string }
+        role_prompt: { type: string }
+        autonomy_mode:
+          type: string
+          enum: [manual, supervised, autonomous]
+          default: supervised
+        host_id: { type: string }
+        capabilities:
+          type: array
+          items:
+            type: object
+            properties:
+              capability: { type: string }
+              enabled: { type: boolean }
+              approval_level:
+                type: string
+                enum: [none, high_risk, always]
+            required: [capability, enabled, approval_level]
+      required: [name, role_prompt]
+
+    UpdateAgentRequest:
+      type: object
+      properties:
+        role_prompt: { type: string }
+        autonomy_mode:
+          type: string
+          enum: [manual, supervised, autonomous]
+        max_concurrency: { type: integer, minimum: 1 }
+
+    Objective:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        owner_agent_id: { type: string, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        priority: { type: integer }
+        status: { $ref: '#/components/schemas/ObjectiveStatus' }
+        definition_of_done:
+          type: object
+          additionalProperties: true
+        budget_limit_usd: { type: number, nullable: true }
+        due_at: { type: string, format: date-time, nullable: true }
+        result_summary: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required:
+        - id
+        - project_id
+        - title
+        - description
+        - priority
+        - status
+        - definition_of_done
+        - created_at
+        - updated_at
+
+    CreateObjectiveRequest:
+      type: object
+      properties:
+        project_id: { type: string }
+        owner_agent_id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        priority: { type: integer, minimum: 1, maximum: 10, default: 5 }
+        budget_limit_usd: { type: number }
+        due_at: { type: string, format: date-time }
+        definition_of_done:
+          type: object
+          additionalProperties: true
+      required: [project_id, title, description, definition_of_done]
+
+    UpdateObjectiveRequest:
+      type: object
+      properties:
+        title: { type: string }
+        description: { type: string }
+        priority: { type: integer, minimum: 1, maximum: 10 }
+        owner_agent_id: { type: string }
+        budget_limit_usd: { type: number }
+        due_at: { type: string, format: date-time }
+
+    CommandAccepted:
+      type: object
+      properties:
+        command_id: { type: string }
+        accepted: { type: boolean }
+        queued_at: { type: string, format: date-time }
+      required: [command_id, accepted, queued_at]
+
+    Task:
+      type: object
+      properties:
+        id: { type: string }
+        objective_id: { type: string }
+        assigned_agent_id: { type: string, nullable: true }
+        title: { type: string }
+        status:
+          type: string
+          enum: [queued, running, retrying, delegated, waiting_input, blocked, done, failed, canceled]
+        definition_of_done:
+          type: object
+          additionalProperties: true
+      required: [id, objective_id, title, status, definition_of_done]
+
+    RunStep:
+      type: object
+      properties:
+        id: { type: string }
+        step_index: { type: integer }
+        tool_name: { type: string, nullable: true }
+        status: { type: string, enum: [running, done, failed, skipped] }
+        error_text: { type: string, nullable: true }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time, nullable: true }
+      required: [id, step_index, status, started_at]
+
+    Run:
+      type: object
+      properties:
+        id: { type: string }
+        objective_id: { type: string }
+        agent_id: { type: string }
+        status: { type: string, enum: [running, waiting_approval, blocked, completed, failed, canceled] }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        cost_usd: { type: number }
+        summary: { type: string, nullable: true }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time, nullable: true }
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/RunStep'
+      required:
+        - id
+        - objective_id
+        - agent_id
+        - status
+        - input_tokens
+        - output_tokens
+        - cost_usd
+        - started_at
+
+    Approval:
+      type: object
+      properties:
+        id: { type: string }
+        objective_id: { type: string, nullable: true }
+        task_id: { type: string, nullable: true }
+        approval_type:
+          type: string
+          enum: [publish, spend, external_action, destructive_action, policy_override]
+        reason: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [pending, approved, rejected, expired]
+        decision_note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time, nullable: true }
+      required: [id, approval_type, reason, status, created_at]
+
+    ApprovalDecisionRequest:
+      type: object
+      properties:
+        decision:
+          type: string
+          enum: [approved, rejected]
+        decision_note:
+          type: string
+      required: [decision]
+
+    Message:
+      type: object
+      properties:
+        id: { type: string }
+        channel: { type: string, enum: [telegram, web, mobile_app, internal] }
+        from_type: { type: string, enum: [user, agent, system] }
+        from_id: { type: string }
+        to_type: { type: string, enum: [user, agent, system] }
+        to_id: { type: string }
+        objective_id: { type: string, nullable: true }
+        task_id: { type: string, nullable: true }
+        body: { type: string }
+        requires_reply: { type: boolean }
+        status: { type: string, enum: [sent, delivered, read, replied] }
+        created_at: { type: string, format: date-time }
+      required:
+        - id
+        - channel
+        - from_type
+        - from_id
+        - to_type
+        - to_id
+        - body
+        - requires_reply
+        - status
+        - created_at
+
+    SendMessageRequest:
+      type: object
+      properties:
+        body: { type: string }
+        requires_reply: { type: boolean, default: false }
+      required: [body]
+
+    Delegation:
+      type: object
+      properties:
+        id: { type: string }
+        objective_id: { type: string }
+        task_id: { type: string }
+        from_agent_id: { type: string }
+        to_agent_id: { type: string }
+        status:
+          type: string
+          enum: [requested, accepted, running, answered, rejected, expired]
+        question: { type: string }
+        context:
+          type: object
+          additionalProperties: true
+        response:
+          type: object
+          additionalProperties: true
+        deadline: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+      required:
+        - id
+        - objective_id
+        - task_id
+        - from_agent_id
+        - to_agent_id
+        - status
+        - question
+        - context
+        - response
+        - created_at
+
+    CreateDelegationRequest:
+      type: object
+      properties:
+        to_agent_id: { type: string }
+        question: { type: string }
+        context:
+          type: object
+          additionalProperties: true
+        deadline: { type: string, format: date-time }
+      required: [to_agent_id, question]
+
+    DelegationResponseRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [accepted, running, answered, rejected]
+        response:
+          type: object
+          additionalProperties: true
+      required: [status]
+
